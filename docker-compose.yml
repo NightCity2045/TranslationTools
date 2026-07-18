@@ -1,6 +1,9 @@
 services:
   nc-translation:
-    build: .
+    build:
+      context: .
+      target: runtime
+
     container_name: nc-translation
     restart: unless-stopped
 
@@ -8,16 +11,25 @@ services:
       NC_TRANSLATION_HOST: 0.0.0.0
       NC_TRANSLATION_PORT: 8090
       NC_TRANSLATION_API_KEY: change-me
+
       NC_TRANSLATION_MODEL_ROOT: /app/models
       NC_TRANSLATION_TOKENIZER_ROOT: /app/tokenizers
       NC_TRANSLATION_GLOSSARY_PATH: /app/config/glossary.json
+
+      NC_TRANSLATION_MAX_TEXT_LENGTH: 240
+      NC_TRANSLATION_CACHE_TTL_SECONDS: 3600
+      NC_TRANSLATION_CACHE_MAX_ITEMS: 10000
+
+      NC_TRANSLATION_INTER_THREADS: 1
+      NC_TRANSLATION_INTRA_THREADS: 2
+      NC_TRANSLATION_BEAM_SIZE: 1
+      NC_TRANSLATION_MAX_DECODING_LENGTH: 128
+      NC_TRANSLATION_COMPUTE_TYPE: default
 
     ports:
       - "8090:8090"
 
     volumes:
-      - models:/app/models
-      - tokenizers:/app/tokenizers
       - ./config:/app/config:ro
 
     healthcheck:
@@ -32,9 +44,3 @@ services:
       timeout: 10s
       retries: 5
       start_period: 120s
-
-# Это отдельный верхнеуровневый раздел.
-# Он находится на одном уровне с services.
-volumes:
-  models:
-  tokenizers:
