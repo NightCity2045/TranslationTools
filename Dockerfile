@@ -13,11 +13,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt ./
+COPY requirements.txt /app/requirements.txt
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir -r requirements.txt
+    && python -m pip install --no-cache-dir -r /app/requirements.txt
 
+
+# ------------------------------------------------------------
+# Скачивание и конвертация моделей
+# ------------------------------------------------------------
 FROM base AS model-builder
 
 RUN python -m pip install \
@@ -25,15 +29,23 @@ RUN python -m pip install \
     --index-url https://download.pytorch.org/whl/cpu \
     torch
 
-COPY download_models.sh ./
+COPY download_models.sh /app/download_models.sh
 
-RUN sed -i 's/\r$//' download_models.sh \
-    && chmod +x download_models.sh
+RUN sed -i 's/\r$//' /app/download_models.sh \
+    && chmod +x /app/download_models.sh
 
 RUN NC_TRANSLATION_MODEL_ROOT=/artifacts/models \
     NC_TRANSLATION_TOKENIZER_ROOT=/artifacts/tokenizers \
     PYTHON_BIN=python \
-    ./download_models.sh
+    /app/download_models.sh \
+    && test -s /artifacts/models/opus-mt-en-ru/model.bin \
+    && test -s /artifacts/models/opus-mt-en-ru/config.json \
+    && test -s /artifacts/models/opus-mt-ru-en/model.bin \
+    && test -s /artifacts/models/opus-mt-ru-en/config.json \
+    && test -d /artifacts/tokenizers/opus-mt-en-ru \
+    && test -n "$(find /artifacts/tokenizers/opus-mt-en-ru -type f -print -quit)" \
+    && test -d /artifacts/tokenizers/opus-mt-ru-en \
+    && test -n "$(find /artifacts/tokenizers/opus-mt-ru-en -type f -print -quit)"
 
 
 # ------------------------------------------------------------
@@ -47,11 +59,20 @@ ENV NC_TRANSLATION_HOST=0.0.0.0 \
     NC_TRANSLATION_TOKENIZER_ROOT=/app/tokenizers \
     NC_TRANSLATION_GLOSSARY_PATH=/app/config/glossary.json
 
-COPY app ./app
-COPY config ./config
+COPY app /app/app
+COPY config /app/config
 
-COPY --from=model-builder /artifacts/models ./models
-COPY --from=model-builder /artifacts/tokenizers ./tokenizers
+COPY --from=model-builder /artifacts/models /app/models
+COPY --from=model-builder /artifacts/tokenizers /app/tokenizers
+
+RUN test -s /app/models/opus-mt-en-ru/model.bin \
+    && test -s /app/models/opus-mt-en-ru/config.json \
+    && test -s /app/models/opus-mt-ru-en/model.bin \
+    && test -s /app/models/opus-mt-ru-en/config.json \
+    && test -d /app/tokenizers/opus-mt-en-ru \
+    && test -n "$(find /app/tokenizers/opus-mt-en-ru -type f -print -quit)" \
+    && test -d /app/tokenizers/opus-mt-ru-en \
+    && test -n "$(find /app/tokenizers/opus-mt-ru-en -type f -print -quit)"
 
 EXPOSE 8090
 
