@@ -1,23 +1,22 @@
 services:
   nc-translation:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
+    image: ghcr.io/nightcity2045/translationtools:main
+    pull_policy: always
 
-    image: nightcity2045/translation-tools:local
     container_name: nc-translation
-
     restart: unless-stopped
 
     environment:
       NC_TRANSLATION_HOST: "0.0.0.0"
       NC_TRANSLATION_PORT: "8090"
-      NC_TRANSLATION_API_KEY: "change-me"
 
-      NC_TRANSLATION_MODEL_ROOT: "/var/lib/nc-translation/models"
-      NC_TRANSLATION_TOKENIZER_ROOT: "/var/lib/nc-translation/tokenizers"
-      NC_TRANSLATION_GLOSSARY_PATH: "/etc/nc-translation/glossary.json"
+      # Обязательно замени на новый секретный ключ.
+      NC_TRANSLATION_API_KEY: "CHANGE_THIS_API_KEY"
+
+      # Эти пути должны совпадать с volumes ниже.
+      NC_TRANSLATION_MODEL_ROOT: "/app/models"
+      NC_TRANSLATION_TOKENIZER_ROOT: "/app/tokenizers"
+      NC_TRANSLATION_GLOSSARY_PATH: "/app/config/glossary.json"
 
       NC_TRANSLATION_MAX_TEXT_LENGTH: "240"
 
@@ -32,19 +31,27 @@ services:
       NC_TRANSLATION_COMPUTE_TYPE: "default"
 
     ports:
-      - "8090:8090"
+      - "7090:8090"
 
     volumes:
-      - ./config:/etc/nc-translation:ro
+      # Постоянное хранение моделей.
+      - models:/app/models
+      - tokenizers:/app/tokenizers
+
+      # Пользовательский глоссарий.
+      - ./glossary.json:/app/config/glossary.json:ro
 
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import os, urllib.request; port=os.getenv('NC_TRANSLATION_PORT', '8090'); urllib.request.urlopen('http://127.0.0.1:' + port + '/health', timeout=5)\""
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5)\""
         ]
-
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 180s
+
+volumes:
+  models:
+  tokenizers:
