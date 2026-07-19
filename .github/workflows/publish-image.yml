@@ -1,7 +1,6 @@
-name: Create and publish TranslationTools image
+name: Create, verify and publish TranslationTools image
 
 on:
-  # Автоматическая публикация при изменениях в main.
   push:
     branches:
       - main
@@ -12,17 +11,17 @@ on:
       - "requirements.txt"
       - "app/**"
       - "config/**"
-      - ".github/workflows/docker-publish.yml"
+      - ".github/workflows/publish-image.yml"
 
-  # Возможность запустить сборку вручную.
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  TEST_IMAGE: translationtools:ci
 
 jobs:
-  build-and-push-image:
+  build-verify-and-push:
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -50,9 +49,6 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-          # Явно создаём:
-          # ghcr.io/nightcity2045/translationtools:main
-          # ghcr.io/nightcity2045/translationtools:sha-xxxxxxx
           tags: |
             type=raw,value=main
             type=sha,prefix=sha-
@@ -63,14 +59,120 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Build and push Docker image
-        id: push
+      # Сначала собираем локальный проверочный образ.
+      # На этом этапе Dockerfile уже выполняет smoke-test entrypoint.
+      - name: Build verification image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           target: runtime
+          platforms: linux/amd64
 
+          load: true
+          push: false
+
+          tags: ${{ env.TEST_IMAGE }}
+
+          cache-from: type=gha
+
+      # Автоматическая замена ручных docker inspect и docker run.
+      - name: Verify image entrypoint and bundled assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "Checking image ENTRYPOINT..."
+
+          ACTUAL_ENTRYPOINT="$(
+            docker image inspect "${TEST_IMAGE}" \
+              --format '{{json .Config.Entrypoint}}'
+          )"
+
+          EXPECTED_ENTRYPOINT='["/usr/local/bin/nc-translation-entrypoint"]'
+
+          if [[ "${ACTUAL_ENTRYPOINT}" != "${EXPECTED_ENTRYPOINT}" ]]; then
+            echo "Unexpected ENTRYPOINT:"
+            echo "Expected: ${EXPECTED_ENTRYPOINT}"
+            echo "Actual:   ${ACTUAL_ENTRYPOINT}"
+            exit 3
+          fi
+
+          echo "Checking bundled seed assets..."
+
+          docker run --rm \
+            --entrypoint sh \
+            "${TEST_IMAGE}" \
+            -ec '
+              test -x /usr/local/bin/nc-translation-entrypoint
+
+              test -s /opt/nc-translation-seed/models/opus-mt-en-ru/model.bin
+              test -s /opt/nc-translation-seed/models/opus-mt-en-ru/config.json
+
+              test -s /opt/nc-translation-seed/models/opus-mt-ru-en/model.bin
+              test -s /opt/nc-translation-seed/models/opus-mt-ru-en/config.json
+
+              test -s /opt/nc-translation-seed/tokenizers/opus-mt-en-ru/tokenizer_config.json
+              test -s /opt/nc-translation-seed/tokenizers/opus-mt-ru-en/tokenizer_config.json
+            '
+
+      # Проверяем ровно тот сценарий, который будет в панели:
+      # пустые named volumes подключены к /app/models и /app/tokenizers.
+      - name: Verify initialization of empty volumes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          MODEL_VOLUME="nc-models-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          TOKENIZER_VOLUME="nc-tokenizers-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          cleanup() {
+            docker volume rm -f "${MODEL_VOLUME}" >/dev/null 2>&1 || true
+            docker volume rm -f "${TOKENIZER_VOLUME}" >/dev/null 2>&1 || true
+          }
+
+          trap cleanup EXIT
+
+          docker volume create "${MODEL_VOLUME}" >/dev/null
+          docker volume create "${TOKENIZER_VOLUME}" >/dev/null
+
+          echo "Running entrypoint against empty volumes..."
+
+          docker run --rm \
+            -e NC_TRANSLATION_MODEL_ROOT=/app/models \
+            -e NC_TRANSLATION_TOKENIZER_ROOT=/app/tokenizers \
+            -v "${MODEL_VOLUME}:/app/models" \
+            -v "${TOKENIZER_VOLUME}:/app/tokenizers" \
+            "${TEST_IMAGE}" \
+            true
+
+          echo "Checking initialized volumes..."
+
+          docker run --rm \
+            --entrypoint sh \
+            -v "${MODEL_VOLUME}:/app/models" \
+            -v "${TOKENIZER_VOLUME}:/app/tokenizers" \
+            "${TEST_IMAGE}" \
+            -ec '
+              test -s /app/models/opus-mt-en-ru/model.bin
+              test -s /app/models/opus-mt-en-ru/config.json
+
+              test -s /app/models/opus-mt-ru-en/model.bin
+              test -s /app/models/opus-mt-ru-en/config.json
+
+              test -s /app/tokenizers/opus-mt-en-ru/tokenizer_config.json
+              test -s /app/tokenizers/opus-mt-ru-en/tokenizer_config.json
+            '
+
+          echo "Entrypoint successfully initialized empty volumes."
+
+      # GHCR-публикация выполняется только после всех проверок.
+      - name: Build and push verified Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
           platforms: linux/amd64
 
           push: true
