@@ -1,14 +1,13 @@
 # syntax=docker/dockerfile:1.7
 
 # ============================================================
-# Базовый образ
+# Общий базовый образ
 # ============================================================
 FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -21,10 +20,9 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 
-RUN python -m pip install --upgrade pip \
-    && python -m pip install \
-        --no-cache-dir \
-        -r /app/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
+    && python -m pip install -r /app/requirements.txt
 
 
 # ============================================================
@@ -32,34 +30,54 @@ RUN python -m pip install --upgrade pip \
 # ============================================================
 FROM base AS model-builder
 
-# PyTorch требуется только для конвертации моделей.
-# В финальный образ он не попадёт.
-RUN python -m pip install \
-    --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu \
-    torch
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch
 
 COPY download_models.sh /app/download_models.sh
 
 RUN sed -i 's/\r$//' /app/download_models.sh \
     && chmod +x /app/download_models.sh
 
-RUN NC_TRANSLATION_MODEL_ROOT=/build-assets/models \
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    --mount=type=cache,target=/root/.cache/pip \
+    NC_TRANSLATION_MODEL_ROOT=/build-assets/models \
     NC_TRANSLATION_TOKENIZER_ROOT=/build-assets/tokenizers \
+    NC_TRANSLATION_SKIP_PIP_INSTALL=1 \
+    HF_HOME=/root/.cache/huggingface \
     PYTHON_BIN=python \
     /app/download_models.sh
 
-# Проверяем обе модели и оба tokenizer-набора.
+# Docker-сборка не продолжится, если хотя бы одна модель повреждена.
 RUN set -eux; \
     test -s /build-assets/models/opus-mt-en-ru/model.bin; \
     test -s /build-assets/models/opus-mt-en-ru/config.json; \
     test -s /build-assets/models/opus-mt-ru-en/model.bin; \
     test -s /build-assets/models/opus-mt-ru-en/config.json; \
+    \
     test -s /build-assets/tokenizers/opus-mt-en-ru/tokenizer_config.json; \
     test -s /build-assets/tokenizers/opus-mt-ru-en/tokenizer_config.json; \
-    test -n "$(find /build-assets/tokenizers/opus-mt-en-ru -type f -print -quit)"; \
-    test -n "$(find /build-assets/tokenizers/opus-mt-ru-en -type f -print -quit)"; \
-    echo "Translation models were built successfully."
+    \
+    { \
+        test -s /build-assets/tokenizers/opus-mt-en-ru/tokenizer.json \
+        || { \
+            test -s /build-assets/tokenizers/opus-mt-en-ru/source.spm; \
+            test -s /build-assets/tokenizers/opus-mt-en-ru/target.spm; \
+            test -s /build-assets/tokenizers/opus-mt-en-ru/vocab.json; \
+        }; \
+    }; \
+    \
+    { \
+        test -s /build-assets/tokenizers/opus-mt-ru-en/tokenizer.json \
+        || { \
+            test -s /build-assets/tokenizers/opus-mt-ru-en/source.spm; \
+            test -s /build-assets/tokenizers/opus-mt-ru-en/target.spm; \
+            test -s /build-assets/tokenizers/opus-mt-ru-en/vocab.json; \
+        }; \
+    }; \
+    \
+    echo "Model builder assets passed validation."
 
 
 # ============================================================
@@ -78,8 +96,7 @@ WORKDIR /app
 COPY app /app/app
 COPY config /app/config
 
-# Модели хранятся в защищённом каталоге, который не перекрывается
-# volumes из docker-compose.yml.
+# Неперекрываемая резервная копия моделей.
 COPY --from=model-builder \
     /build-assets/models \
     /opt/nc-translation-seed/models
@@ -94,18 +111,43 @@ RUN sed -i 's/\r$//' /usr/local/bin/nc-translation-entrypoint \
     && chmod +x /usr/local/bin/nc-translation-entrypoint \
     && mkdir -p /app/models /app/tokenizers
 
-# Проверяем резервные модели внутри финального образа.
+# Проверяем наличие entrypoint и резервных файлов прямо в образе.
 RUN set -eux; \
+    test -x /usr/local/bin/nc-translation-entrypoint; \
+    \
     test -s /opt/nc-translation-seed/models/opus-mt-en-ru/model.bin; \
     test -s /opt/nc-translation-seed/models/opus-mt-en-ru/config.json; \
     test -s /opt/nc-translation-seed/models/opus-mt-ru-en/model.bin; \
     test -s /opt/nc-translation-seed/models/opus-mt-ru-en/config.json; \
+    \
     test -s /opt/nc-translation-seed/tokenizers/opus-mt-en-ru/tokenizer_config.json; \
-    test -s /opt/nc-translation-seed/tokenizers/opus-mt-ru-en/tokenizer_config.json; \
-    echo "Runtime seed assets are valid."
+    test -s /opt/nc-translation-seed/tokenizers/opus-mt-ru-en/tokenizer_config.json
+
+# Автоматический smoke-test entrypoint во время docker build.
+#
+# Здесь создаются искусственно пустые каталоги, после чего entrypoint
+# обязан самостоятельно заполнить и проверить их.
+RUN set -eux; \
+    rm -rf /tmp/nc-translation-test; \
+    \
+    NC_TRANSLATION_MODEL_ROOT=/tmp/nc-translation-test/models \
+    NC_TRANSLATION_TOKENIZER_ROOT=/tmp/nc-translation-test/tokenizers \
+    /usr/local/bin/nc-translation-entrypoint true; \
+    \
+    test -s /tmp/nc-translation-test/models/opus-mt-en-ru/model.bin; \
+    test -s /tmp/nc-translation-test/models/opus-mt-ru-en/model.bin; \
+    test -s /tmp/nc-translation-test/tokenizers/opus-mt-en-ru/tokenizer_config.json; \
+    test -s /tmp/nc-translation-test/tokenizers/opus-mt-ru-en/tokenizer_config.json; \
+    \
+    rm -rf /tmp/nc-translation-test; \
+    echo "Entrypoint smoke test passed."
 
 EXPOSE 8090
 
 ENTRYPOINT ["/usr/local/bin/nc-translation-entrypoint"]
 
-CMD ["sh", "-c", "exec uvicorn app.main:app --host \"${NC_TRANSLATION_HOST}\" --port \"${NC_TRANSLATION_PORT}\""]
+CMD [
+    "sh",
+    "-c",
+    "exec uvicorn app.main:app --host \"${NC_TRANSLATION_HOST}\" --port \"${NC_TRANSLATION_PORT}\""
+]
