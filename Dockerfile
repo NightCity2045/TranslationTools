@@ -146,8 +146,4 @@ EXPOSE 8090
 
 ENTRYPOINT ["/usr/local/bin/nc-translation-entrypoint"]
 
-CMD [
-    "sh",
-    "-c",
-    "exec uvicorn app.main:app --host \"${NC_TRANSLATION_HOST}\" --port \"${NC_TRANSLATION_PORT}\""
-]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host \"${NC_TRANSLATION_HOST}\" --port \"${NC_TRANSLATION_PORT}\""]
