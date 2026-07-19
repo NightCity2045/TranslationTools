@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 MODEL_ROOT="${NC_TRANSLATION_MODEL_ROOT:-/app/models}"
 TOKENIZER_ROOT="${NC_TRANSLATION_TOKENIZER_ROOT:-/app/tokenizers}"
@@ -16,114 +16,139 @@ log() {
     printf '[nc-translation] %s\n' "$*"
 }
 
-model_is_valid() {
-    local name="$1"
-    local directory="$MODEL_ROOT/$name"
+model_directory_is_valid() {
+    local directory="$1"
 
     test -d "$directory" \
         && test -s "$directory/model.bin" \
         && test -s "$directory/config.json"
 }
 
-seed_model_is_valid() {
-    local name="$1"
-    local directory="$SEED_MODEL_ROOT/$name"
-
-    test -d "$directory" \
-        && test -s "$directory/model.bin" \
-        && test -s "$directory/config.json"
-}
-
-tokenizer_is_valid() {
-    local name="$1"
-    local directory="$TOKENIZER_ROOT/$name"
+tokenizer_directory_is_valid() {
+    local directory="$1"
 
     test -d "$directory" \
         && test -s "$directory/tokenizer_config.json" \
-        && test -n "$(find "$directory" -type f -print -quit 2>/dev/null)"
+        && {
+            test -s "$directory/tokenizer.json" \
+                || {
+                    test -s "$directory/source.spm" \
+                        && test -s "$directory/target.spm" \
+                        && test -s "$directory/vocab.json"
+                }
+        }
 }
 
-seed_tokenizer_is_valid() {
-    local name="$1"
-    local directory="$SEED_TOKENIZER_ROOT/$name"
+restore_directory() {
+    local asset_type="$1"
+    local name="$2"
+    local source="$3"
+    local destination="$4"
+    local validator="$5"
 
-    test -d "$directory" \
-        && test -s "$directory/tokenizer_config.json" \
-        && test -n "$(find "$directory" -type f -print -quit 2>/dev/null)"
+    local temporary="${destination}.incoming.$$"
+
+    if ! "$validator" "$source"; then
+        log "ERROR: bundled $asset_type is missing or damaged: $source"
+        exit 3
+    fi
+
+    log "Restoring $asset_type: $name"
+
+    rm -rf "$temporary"
+    mkdir -p "$temporary"
+
+    cp -a "$source/." "$temporary/"
+
+    if ! "$validator" "$temporary"; then
+        log "ERROR: copied $asset_type failed validation: $name"
+        rm -rf "$temporary"
+        exit 3
+    fi
+
+    rm -rf "$destination"
+    mv "$temporary" "$destination"
+
+    log "Restored $asset_type: $name"
 }
 
-restore_model() {
+ensure_model() {
     local name="$1"
+
     local source="$SEED_MODEL_ROOT/$name"
     local destination="$MODEL_ROOT/$name"
 
-    if ! seed_model_is_valid "$name"; then
-        log "ERROR: seed model is missing or damaged: $source"
-        exit 3
+    if model_directory_is_valid "$destination"; then
+        log "Model OK: $name"
+        return
     fi
 
-    log "Restoring model $name into persistent volume..."
+    if [[ -e "$destination" ]]; then
+        log "Model is incomplete or damaged: $name"
+    else
+        log "Model is missing: $name"
+    fi
 
-    rm -rf "$destination"
-    mkdir -p "$destination"
-    cp -a "$source/." "$destination/"
+    restore_directory \
+        "model" \
+        "$name" \
+        "$source" \
+        "$destination" \
+        model_directory_is_valid
 }
 
-restore_tokenizer() {
+ensure_tokenizer() {
     local name="$1"
+
     local source="$SEED_TOKENIZER_ROOT/$name"
     local destination="$TOKENIZER_ROOT/$name"
 
-    if ! seed_tokenizer_is_valid "$name"; then
-        log "ERROR: seed tokenizer is missing or damaged: $source"
-        exit 3
+    if tokenizer_directory_is_valid "$destination"; then
+        log "Tokenizer OK: $name"
+        return
     fi
 
-    log "Restoring tokenizer $name into persistent volume..."
+    if [[ -e "$destination" ]]; then
+        log "Tokenizer is incomplete or damaged: $name"
+    else
+        log "Tokenizer is missing: $name"
+    fi
 
-    rm -rf "$destination"
-    mkdir -p "$destination"
-    cp -a "$source/." "$destination/"
+    restore_directory \
+        "tokenizer" \
+        "$name" \
+        "$source" \
+        "$destination" \
+        tokenizer_directory_is_valid
 }
-
-mkdir -p "$MODEL_ROOT"
-mkdir -p "$TOKENIZER_ROOT"
 
 log "Checking translation assets..."
 log "Model root: $MODEL_ROOT"
 log "Tokenizer root: $TOKENIZER_ROOT"
 
-for name in "${MODEL_NAMES[@]}"; do
-    if model_is_valid "$name"; then
-        log "Model OK: $name"
-    else
-        log "Model missing or incomplete: $name"
-        restore_model "$name"
-    fi
+mkdir -p "$MODEL_ROOT"
+mkdir -p "$TOKENIZER_ROOT"
 
-    if tokenizer_is_valid "$name"; then
-        log "Tokenizer OK: $name"
-    else
-        log "Tokenizer missing or incomplete: $name"
-        restore_tokenizer "$name"
-    fi
+for name in "${MODEL_NAMES[@]}"; do
+    ensure_model "$name"
+    ensure_tokenizer "$name"
 done
 
 log "Running final validation..."
 
 for name in "${MODEL_NAMES[@]}"; do
-    if ! model_is_valid "$name"; then
-        log "ERROR: model validation failed: $name"
+    if ! model_directory_is_valid "$MODEL_ROOT/$name"; then
+        log "ERROR: final model validation failed: $name"
         exit 3
     fi
 
-    if ! tokenizer_is_valid "$name"; then
-        log "ERROR: tokenizer validation failed: $name"
+    if ! tokenizer_directory_is_valid "$TOKENIZER_ROOT/$name"; then
+        log "ERROR: final tokenizer validation failed: $name"
         exit 3
     fi
 done
 
 log "All translation assets are ready."
-log "Starting Translation Service..."
+log "Starting requested command..."
 
 exec "$@"
